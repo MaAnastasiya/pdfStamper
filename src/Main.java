@@ -1,31 +1,24 @@
-import com.itextpdf.kernel.colors.ColorConstants;
-import com.itextpdf.kernel.font.PdfFont;
-import com.itextpdf.kernel.font.PdfFontFactory;
-import com.itextpdf.kernel.geom.Rectangle;
-import com.itextpdf.kernel.pdf.*;
-import com.itextpdf.layout.Document;
-import com.itextpdf.layout.borders.SolidBorder;
-import com.itextpdf.layout.element.Image;
-import com.itextpdf.layout.element.Paragraph;
-import com.itextpdf.layout.properties.TextAlignment;
-import com.itextpdf.io.image.ImageData;
-import com.itextpdf.io.image.ImageDataFactory;
+import org.apache.pdfbox.pdmodel.PDDocument;
+import org.apache.pdfbox.pdmodel.PDPage;
+import org.apache.pdfbox.pdmodel.PDPageContentStream;
+import org.apache.pdfbox.pdmodel.common.PDRectangle;
+import org.apache.pdfbox.pdmodel.graphics.image.PDImageXObject;
+import org.apache.pdfbox.util.Matrix;
 
-import java.io.*;
-import java.nio.file.Files;
-import java.nio.file.Paths;
-import java.nio.file.StandardCopyOption;
-import java.time.LocalDate;
-import java.time.format.DateTimeFormatter;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.io.InputStreamReader;
 import java.util.Properties;
 
 public class Main {
-    public static void showFiles(File[] files, String destinationFolder, String stampText, float xOffset, float yOffset, String imagePath, float stampWidth) {
+
+    public static void showFiles(File[] files, String destinationFolder, String stampText, float xOffset, float yOffset, float stampWidth, float stampHeight, String imagePath) {
         for (File file : files) {
             if (file.isDirectory()) {
-                showFiles(file.listFiles(), destinationFolder, stampText, xOffset, yOffset, imagePath, stampWidth); //повторный вызов метода для директории
+                showFiles(file.listFiles(), destinationFolder, stampText, xOffset, yOffset, stampWidth, stampHeight, imagePath); // повторный вызов метода для директории
             } else {
-                pdfStamper(file.getAbsolutePath(), destinationFolder, stampText, xOffset, yOffset, imagePath, stampWidth);
+                pdfStamper(file.getAbsolutePath(), destinationFolder, stampText, xOffset, yOffset, stampWidth, stampHeight, imagePath);
             }
         }
     }
@@ -45,75 +38,76 @@ public class Main {
         String stampText = properties.getProperty("stamp.text");
         float xOffset = Float.parseFloat(properties.getProperty("stamp.x.offset"));
         float yOffset = Float.parseFloat(properties.getProperty("stamp.y.offset"));
-        String imagePath = properties.getProperty("stamp.image.path");
         float stampWidth = Float.parseFloat(properties.getProperty("stamp.width"));
+        float stampHeight = Float.parseFloat(properties.getProperty("stamp.height"));
+        String imagePath = properties.getProperty("stamp.image.path");
 
         File dir = new File(sourceFolder);
-        showFiles(dir.listFiles(), destinationFolder, stampText, xOffset, yOffset, imagePath, stampWidth);
+        showFiles(dir.listFiles(), destinationFolder, stampText, xOffset, yOffset, stampWidth, stampHeight, imagePath);
     }
 
-    public static void pdfStamper(String src, String destinationFolder, String stampText, float xOffset, float yOffset, String imagePath, float stampWidth) {
-        // Получаем текущую дату
-        LocalDate currentDate = LocalDate.now();
-        DateTimeFormatter formatter = DateTimeFormatter.ofPattern("dd-MM-yyyy");
-        String formattedDate = currentDate.format(formatter);
+    public static void pdfStamper(String pdfFilePath, String destinationFolder, String stampText, float rightMarginCm, float bottomMarginCm, float stampWidthCm, float stampHeightCm, String stampImagePath) {
 
-        String dest = destinationFolder.equals(new File(src).getParent()) ? src : destinationFolder + "/" + new File(src).getName();
-        String temp = "temp.pdf";
+        // Конвертация сантиметров в точки (1 см = 28.3465 точек)
+        float bottomMarginPoints = bottomMarginCm * 28.3465f;
+        float rightMarginPoints = rightMarginCm * 28.3465f;
+        float stampWidthPoints = stampWidthCm * 28.3465f;
+        float stampHeightPoints = stampHeightCm * 28.3465f;
 
-        try {
-            // Открываем существующий PDF документ для чтения
-            PdfReader reader = new PdfReader(src);
-            PdfWriter writer = new PdfWriter(temp);
-            PdfDocument pdfDoc = new PdfDocument(reader, writer);
-            Document doc = new Document(pdfDoc);
+        File pdfFile = new File(pdfFilePath);
+        if (!pdfFile.exists()) {
+            System.out.println("File not found: " + pdfFilePath);
+            return;
+        }
 
-            // Загружаем шрифт, поддерживающий кириллицу
-            PdfFont font = PdfFontFactory.createFont("ArialRegular.ttf", "CP1251");
+        try (PDDocument document = PDDocument.load(pdfFile)) {
+            PDImageXObject stampImage = PDImageXObject.createFromFile(stampImagePath, document);
 
-            // Перебираем все страницы и добавляем штамп
-            for (int i = 1; i <= pdfDoc.getNumberOfPages(); i++) {
-                PdfPage page = pdfDoc.getPage(i);
-                Rectangle pageSize = page.getPageSize();
+            int pageCount = document.getNumberOfPages();
+            for (int i = 0; i < pageCount; i++) {
+                PDPage page = document.getPage(i);
+                PDRectangle mediaBox = page.getMediaBox();
+                int rotation = page.getRotation();
 
-                // Позиция штампа (справа снизу)
-                float x = pageSize.getRight() - stampWidth - xOffset; // отступ от правого края
-                float y = pageSize.getBottom() + yOffset; // отступ от нижнего края
+                float pageWidth = mediaBox.getWidth();
+                float pageHeight = mediaBox.getHeight();
 
-                if (imagePath != null && !imagePath.isEmpty()) {
-                    // Если указан путь к изображению, добавляем изображение
-                    ImageData imageData = ImageDataFactory.create(imagePath);
-                    Image imageStamp = new Image(imageData)
-                            .setFixedPosition(i, x, y)
-                            .setWidth(stampWidth);
-                    doc.add(imageStamp);
+                float x, y;
+                if (rotation == 90 || rotation == 270) {
+                    // Учитываем ротацию страницы и размещаем штамп с поворотом
+                    x = pageWidth - rightMarginPoints - stampWidthPoints;
+                    y = bottomMarginPoints;
+                    PDPageContentStream contentStream = new PDPageContentStream(document, page,true,true,true);
+                    contentStream.saveGraphicsState();
+                    // Применяем поворот штампа на 270 градусов
+                    if (rotation == 90) {
+                        contentStream.transform(new Matrix(0, 1, -1, 0, pageHeight, 0));
+                    } else if (rotation == 270) {
+                        contentStream.transform(new Matrix(0, -1, 1, 0, 0, pageWidth));
+                    }
+                    contentStream.drawImage(stampImage, x, y, stampWidthPoints, stampHeightPoints);
+                    contentStream.restoreGraphicsState();
+                    contentStream.close();
                 } else {
-                    // Создаем штамп с двумя строками текста
-                    Paragraph stamp = new Paragraph(stampText + "\n" + formattedDate)
-                            .setFontSize(12)
-                            .setFontColor(ColorConstants.BLACK)
-                            .setFont(font)
-                            .setBorder(new SolidBorder(ColorConstants.BLACK, 1))
-                            .setPadding(5)
-                            .setTextAlignment(TextAlignment.CENTER)
-                            .setFixedPosition(i, x, y, stampWidth); // фиксированное положение и ширина
-                    doc.add(stamp);
+                    x = pageWidth - rightMarginPoints - stampWidthPoints;
+                    y = bottomMarginPoints;
+                    PDPageContentStream contentStream = new PDPageContentStream(document, page,true,true,true);
+                    contentStream.drawImage(stampImage, x, y, stampWidthPoints, stampHeightPoints);
+                    contentStream.close();
                 }
             }
 
-            // Закрываем документ
-            doc.close();
-            pdfDoc.close();
-
-            // Заменяем исходный файл временным файлом или сохраняем в новую папку
-            if (dest.equals(src)) {
-                Files.move(Paths.get(temp), Paths.get(src), StandardCopyOption.REPLACE_EXISTING);
+            // Определяем путь для сохранения файла
+            String savePath;
+            if (destinationFolder.equals(pdfFile.getParent())) {
+                savePath = pdfFilePath; // Если destinationFolder совпадает с папкой исходного файла
             } else {
-                Files.move(Paths.get(temp), Paths.get(dest), StandardCopyOption.REPLACE_EXISTING);
+                savePath = destinationFolder +"/"+ pdfFile.getName(); // Иначе используем destinationFolder
             }
 
+            document.save(new File(savePath));
         } catch (IOException e) {
-            e.printStackTrace();
+            System.out.println("An error occurred while processing the PDF file: " + e.getMessage());
         }
     }
 }
